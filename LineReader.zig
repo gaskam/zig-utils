@@ -10,15 +10,35 @@ const String = struct {
     string_list: []const u8,
 };
 
-const LineReader = struct{
+const LineReader = struct {
     line: []const u8,
     allocator: std.mem.Allocator,
-    fn init(allocator: std.mem.Allocator, reader) Self {
-        return .{
-            ...
-        }
+    reader: std.fs.File.Reader,
+    const Self = @This();
+    fn init(allocator: std.mem.Allocator, reader: std.fs.File.Reader) Self {
+        return .{ .allocator = allocator, .reader = reader, .line = "" };
     }
-}
+
+    fn read(self: Self) ![]const u8 {
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        try self.reader.streamUntilDelimiter(buffer.writer(), '\n', null);
+        return std.mem.trimRight(u8, buffer.items, "\r\n");
+    }
+
+    fn readValue(self: Self, comptime ReturnType: type) !ReturnType {
+        const value = try read(self);
+        errdefer self.allocator.free(value);
+        return switch (@typeInfo(ReturnType)) {
+            .Int => try std.fmt.parseInt(ReturnType, value, 10),
+            .Float => try std.fmt.parseFloat(ReturnType, value),
+            else => error.UnsupportedType,
+        };
+    }
+
+    fn readList(self: Self, comptime ReturnType: type, delimiter: u8) ![]ReturnType {
+        var values = std.mem.splitScalar(u8, self.read(), delimiter);
+    }
+};
 
 /// Reads one line of stdin using an allocator an returns the result as a string
 fn readStdInLine(allocator: std.mem.Allocator) ![]const u8 {
@@ -56,58 +76,63 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const n: usize = @intCast(try readStdInInt(allocator));
+    const stdin = std.io.getStdIn().reader();
 
-    var listsList = try std.ArrayList(List).initCapacity(allocator, n);
-    for (0..n) |_| {
-        const subListLen: usize = @intCast(try readStdInInt(allocator));
+    const lineReader = LineReader.init(allocator, stdin);
 
-        var subList = try std.ArrayList(i32).initCapacity(allocator, subListLen);
+    // std.debug.print("Line read: {d}", .{try lineReader.readList(i32)});
+    try lineReader.readList(i32);
 
-        const line = try allocator.dupe(u8, try readStdInLine(allocator));
-        var values = std.mem.splitScalar(u8, line, ' ');
+    // const n: usize = @intCast(try readStdInInt(allocator));
 
-        while (values.next()) |v| {
-            const value = try std.fmt.parseInt(i32, v, 10);
-            subList.appendAssumeCapacity(value);
-        }
-        listsList.appendAssumeCapacity(List{ .int_list = subList.items, .size1 = subListLen });
-    }
-    const lists = listsList.items;
+    // var listsList = try std.ArrayList(List).initCapacity(allocator, n);
+    // for (0..n) |_| {
+    //     const subListLen: usize = @intCast(try readStdInInt(allocator));
 
-    var stringsList = try std.ArrayList(String).initCapacity(allocator, n);
-    for (0..n) |_| {
-        const subListLen: usize = @intCast(try readStdInInt(allocator));
+    //     var subList = try std.ArrayList(i32).initCapacity(allocator, subListLen);
 
-        const line = try allocator.dupe(u8, try readStdInLine(allocator));
+    //     const line = try allocator.dupe(u8, try readStdInLine(allocator));
+    //     var values = std.mem.splitScalar(u8, line, ' ');
 
-        stringsList.appendAssumeCapacity(String{ .string_list = line, .size2 = subListLen });
-    }
-    const strings = stringsList.items;
+    //     while (values.next()) |v| {
+    //         const value = try std.fmt.parseInt(i32, v, 10);
+    //         subList.appendAssumeCapacity(value);
+    //     }
+    //     listsList.appendAssumeCapacity(List{ .int_list = subList.items, .size1 = subListLen });
+    // }
+    // const lists = listsList.items;
 
-    var matricesList = try std.ArrayList(Matrix).initCapacity(allocator, n);
-    for (0..2) |_| {
-        const subListLen: usize = @intCast(try readStdInInt(allocator));
+    // var stringsList = try std.ArrayList(String).initCapacity(allocator, n);
+    // for (0..n) |_| {
+    //     const subListLen: usize = @intCast(try readStdInInt(allocator));
 
-        var subList = try std.ArrayList([]i32).initCapacity(allocator, subListLen);
+    //     const line = try allocator.dupe(u8, try readStdInLine(allocator));
 
-        for (0..subListLen) |_| {
-            const line = try allocator.dupe(u8, try readStdInLine(allocator));
-            var subSubList = try std.ArrayList(i32).initCapacity(allocator, line.len);
+    //     stringsList.appendAssumeCapacity(String{ .string_list = line, .size2 = subListLen });
+    // }
+    // const strings = stringsList.items;
 
-            var values = std.mem.splitScalar(u8, line, ' ');
+    // var matricesList = try std.ArrayList(Matrix).initCapacity(allocator, n);
+    // for (0..2) |_| {
+    //     const subListLen: usize = @intCast(try readStdInInt(allocator));
 
-            while (values.next()) |v| {
-                const buf = v;
-                const value = try std.fmt.parseInt(i32, buf, 10);
-                subSubList.appendAssumeCapacity(value);
-            }
-            subList.appendAssumeCapacity(subSubList.items);
-        }
+    //     var subList = try std.ArrayList([]i32).initCapacity(allocator, subListLen);
 
-        matricesList.appendAssumeCapacity(Matrix{ .list_list = subList.items, .size3 = subListLen });
-    }
-    const matrices = matricesList.items;
+    //     for (0..subListLen) |_| {
+    //         const line = try allocator.dupe(u8, try readStdInLine(allocator));
+    //         var subSubList = try std.ArrayList(i32).initCapacity(allocator, line.len);
 
-    try simple(@intCast(n), lists, strings, matrices);
+    //         var values = std.mem.splitScalar(u8, line, ' ');
+
+    //         while (values.next()) |v| {
+    //             const buf = v;
+    //             const value = try std.fmt.parseInt(i32, buf, 10);
+    //             subSubList.appendAssumeCapacity(value);
+    //         }
+    //         subList.appendAssumeCapacity(subSubList.items);
+    //     }
+
+    //     matricesList.appendAssumeCapacity(Matrix{ .list_list = subList.items, .size3 = subListLen });
+    // }
+    // const matrices = matricesList.items;
 }

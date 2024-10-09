@@ -64,12 +64,12 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
     const stdin = std.io.getStdIn().reader();
+    const lineReader = LineReader.init(allocator, stdin);
+
 
     std.debug.print("Enter some numbers: ", .{});
 
-    const lineReader = LineReader.init(allocator, stdin);
 
     std.debug.print("Result: {any}\n", .{try lineReader.readList(f128, ' ')});
 }

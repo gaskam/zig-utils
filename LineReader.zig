@@ -21,7 +21,6 @@ const LineReader = struct {
 
     fn read(self: Self) ![]const u8 {
         var buffer = std.ArrayList(u8).init(self.allocator);
-        errdefer self.allocator.free(buffer.items);
         try self.reader.streamUntilDelimiter(buffer.writer(), '\n', null);
         return std.mem.trimRight(u8, buffer.items, "\r\n");
     }
@@ -37,18 +36,7 @@ const LineReader = struct {
     }
 
     fn readList(self: Self, comptime ReturnType: type, delimiter: u8) ![]ReturnType {
-        var values = std.mem.splitScalar(u8, try self.read(), delimiter);
-        var output = std.ArrayList(ReturnType).init(self.allocator);
-
-        while (values.next()) |v| {
-            try output.append(switch (@typeInfo(ReturnType)) {
-                .Int => try std.fmt.parseInt(ReturnType, v, 10),
-                .Float => try std.fmt.parseFloat(ReturnType, v),
-                else => error.UnsupportedType,
-            });
-        }
-
-        return output.items;
+        var values = std.mem.splitScalar(u8, self.read(), delimiter);
     }
 };
 
@@ -83,34 +71,17 @@ fn readStdInFloat(allocator: std.mem.Allocator) !f64 {
     return out.number;
 }
 
-fn writeStdOutLine(line: []const u8, writer: std.fs.File.Writer) !void {
-    try writer.print("{s}\n", .{line});
-}
-
 pub fn main() !void {
-    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // defer arena.deinit();
-    // const allocator = arena.allocator();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-    // const stdin = std.io.getStdIn().reader();
+    const stdin = std.io.getStdIn().reader();
 
-    // std.debug.print("Enter a number: ", .{});
+    const lineReader = LineReader.init(allocator, stdin);
 
-    // const lineReader = LineReader.init(allocator, stdin);
-
-    // // std.debug.print("Line read: {d}", .{try lineReader.readList(i32)});
-    // std.debug.print("Result: {any}\n", .{try lineReader.readList(f128, ' ')});
-
-    // var a: u128 = 0;
-    for (0..1000000) |i| {
-        var buf: [15]u8 = undefined;
-        const str = try std.fmt.bufPrint(&buf, "{}", .{i});
-        try writeStdOutLine(str, std.io.getStdOut().writer());
-    }
-
-    // std.debug.print("a: {d}\n", .{a});
-
-    // try writeStdOutLine("Hello, World!", std.io.getStdOut().writer());
+    // std.debug.print("Line read: {d}", .{try lineReader.readList(i32)});
+    try lineReader.readList(i32);
 
     // const n: usize = @intCast(try readStdInInt(allocator));
 

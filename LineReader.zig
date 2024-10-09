@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const List = struct {
     size1: usize,
@@ -21,13 +22,15 @@ const LineReader = struct {
 
     fn read(self: Self) ![]const u8 {
         var buffer = std.ArrayList(u8).init(self.allocator);
+        errdefer buffer.deinit();
         try self.reader.streamUntilDelimiter(buffer.writer(), '\n', null);
-        return std.mem.trimRight(u8, buffer.items, "\r\n");
+        if (builtin.target.os.tag == .windows and buffer.getLast() == '\r') _ = buffer.pop();
+        return buffer.toOwnedSlice();
     }
 
     fn readValue(self: Self, comptime ReturnType: type) !ReturnType {
         const value = try read(self);
-        errdefer self.allocator.free(value);
+        defer self.allocator.free(value);
         return switch (@typeInfo(ReturnType)) {
             .Int => try std.fmt.parseInt(ReturnType, value, 10),
             .Float => try std.fmt.parseFloat(ReturnType, value),
@@ -36,52 +39,65 @@ const LineReader = struct {
     }
 
     fn readList(self: Self, comptime ReturnType: type, delimiter: u8) ![]ReturnType {
-        var values = std.mem.splitScalar(u8, self.read(), delimiter);
+        const line = try self.read();
+        defer self.allocator.free(line);
+        var values = std.mem.splitScalar(u8, line, delimiter);
+        var output = std.ArrayList(ReturnType).init(self.allocator);
+
+        while (values.next()) |v| {
+            try output.append(switch (@typeInfo(ReturnType)) {
+                .Int => try std.fmt.parseInt(ReturnType, v, 10),
+                .Float => try std.fmt.parseFloat(ReturnType, v),
+                else => error.UnsupportedType,
+            });
+        }
+
+        return try output.toOwnedSlice();
+    }
+
+    fn readStrings(self: Self, delimiter: u8) ![][]const u8 {
+        const line = try self.read();
+        defer self.allocator.free(line);
+        var values = std.mem.splitScalar(u8, line, delimiter);
+
+        var output = std.ArrayList([]const u8).init(self.allocator);
+
+        while (values.next()) |v| {
+            try output.append(v);
+        }
+
+        return try output.toOwnedSlice();
     }
 };
 
-/// Reads one line of stdin using an allocator an returns the result as a string
-fn readStdInLine(allocator: std.mem.Allocator) ![]const u8 {
-    const stdin = std.io.getStdIn().reader();
-    var buffer = std.ArrayList(u8).init(allocator);
-    try stdin.streamUntilDelimiter(buffer.writer(), '\n', null);
-    return std.mem.trimRight(u8, buffer.items, "\r\n");
-}
-
-/// Uses `readStdInLine` to read a line from stdin and converts it into an integer
-fn readStdInInt(allocator: std.mem.Allocator) !i32 {
-    const Input = union {
-        string: []const u8,
-        number: i32,
-    };
-    var out = Input{ .string = try readStdInLine(allocator) };
-    out = Input{ .number = try std.fmt.parseInt(i32, out.string, 10) };
-
-    return out.number;
-}
-
-fn readStdInFloat(allocator: std.mem.Allocator) !f64 {
-    const Input = union {
-        string: []const u8,
-        number: f64,
-    };
-    var out = Input{ .string = try readStdInLine(allocator) };
-    out = Input{ .number = try std.fmt.parseFloat(f64, out.string) };
-
-    return out.number;
+fn writeStdOutLine(line: []const u8, writer: std.fs.File.Writer) !void {
+    try writer.print("{s}\n", .{line});
 }
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // defer arena.deinit();
+    // const allocator = arena.allocator();
 
-    const stdin = std.io.getStdIn().reader();
+    // const stdin = std.io.getStdIn().reader();
 
-    const lineReader = LineReader.init(allocator, stdin);
+    // std.debug.print("Enter a number: ", .{});
 
-    // std.debug.print("Line read: {d}", .{try lineReader.readList(i32)});
-    try lineReader.readList(i32);
+    // const lineReader = LineReader.init(allocator, stdin);
+
+    // // std.debug.print("Line read: {d}", .{try lineReader.readList(i32)});
+    // std.debug.print("Result: {any}\n", .{try lineReader.readList(f128, ' ')});
+
+    // var a: u128 = 0;
+    for (0..1000000) |i| {
+        var buf: [15]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "{}", .{i});
+        try writeStdOutLine(str, std.io.getStdOut().writer());
+    }
+
+    // std.debug.print("a: {d}\n", .{a});
+
+    // try writeStdOutLine("Hello, World!", std.io.getStdOut().writer());
 
     // const n: usize = @intCast(try readStdInInt(allocator));
 
@@ -135,4 +151,26 @@ pub fn main() !void {
     //     matricesList.appendAssumeCapacity(Matrix{ .list_list = subList.items, .size3 = subListLen });
     // }
     // const matrices = matricesList.items;
+}
+
+const expect = std.testing.expect;
+
+test "LineReader" {
+    const allocator = std.testing.allocator;
+    const input = try std.fs.cwd().openFile("tests/LineReader.input", .{});
+
+    var lineReader = LineReader.init(allocator, input.reader());
+    const line = try lineReader.read();
+    defer allocator.free(line);
+    const numbers = try lineReader.readList(i32, ' ');
+    defer allocator.free(numbers);
+    const floats = try lineReader.readList(f64, ',');
+    defer allocator.free(floats);
+    const strings = try lineReader.readStrings(' ');
+    _ = strings;
+
+    try expect(std.mem.eql(u8, line, "Hello world"));
+    try expect(std.mem.eql(i32, numbers, &[_]i32{ 123, 456, 789 }));
+    try expect(std.mem.eql(f64, floats, &[_]f64{ -2.5, 2.8, 9.7, 3.14 }));
+    // try expect(std.mem.eql([]const u8, strings, &[_][]const u8{ "the", "new", "hello", "world" }));
 }

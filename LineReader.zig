@@ -2,12 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const LineReader = struct {
-    line: []const u8,
     allocator: std.mem.Allocator,
     reader: std.fs.File.Reader,
     const Self = @This();
+
     fn init(allocator: std.mem.Allocator, reader: std.fs.File.Reader) Self {
-        return .{ .allocator = allocator, .reader = reader, .line = "" };
+        return .{ .allocator = allocator, .reader = reader };
     }
 
     /// Reads a line and removes the newline characters(\n, and \r\n for windows)
@@ -19,16 +19,27 @@ const LineReader = struct {
         return buffer.toOwnedSlice();
     }
 
+    /// Parses a level 1 type
+    /// Only accepts Int, Float and string([]const u8) types
+    fn parseType(self: Self, comptime ReturnType: type, buf: []const u8) !ReturnType {
+        return switch (@typeInfo(ReturnType)) {
+            .Int => std.fmt.parseInt(ReturnType, buf, 10),
+            .Float => std.fmt.parseFloat(ReturnType, buf),
+            // Asserts the type is []const u8
+            .Pointer => blk: {
+                if (ReturnType != []const u8) return error.UnsupportedType;
+                break :blk self.allocator.dupe(u8, buf);
+            },
+            else => error.UnsupportedType,
+        };
+    }
+
     /// Parses one line to a value(only supports int or float types)
     /// Asserts there is a numeric value
     fn readValue(self: Self, comptime ReturnType: type) !ReturnType {
         const value = try read(self);
         defer self.allocator.free(value);
-        return switch (@typeInfo(ReturnType)) {
-            .Int => try std.fmt.parseInt(ReturnType, value, 10),
-            .Float => try std.fmt.parseFloat(ReturnType, value),
-            else => error.UnsupportedType,
-        };
+        return self.parseType(ReturnType, value);
     }
 
     /// Reads all elements on a line, splits them by `delimiter` and parses them
@@ -40,16 +51,7 @@ const LineReader = struct {
         var output = std.ArrayList(ReturnType).init(self.allocator);
 
         while (values.next()) |v| {
-            try output.append(switch (@typeInfo(ReturnType)) {
-                .Int => try std.fmt.parseInt(ReturnType, v, 10),
-                .Float => try std.fmt.parseFloat(ReturnType, v),
-                // Asserts the type is []u8
-                .Pointer => blk: {
-                    if (ReturnType != []const u8) return error.UnsupportedType;
-                    break :blk try self.allocator.dupe(u8, v);
-                },
-                else => error.UnsupportedType,
-            });
+            try output.append(try self.parseType(ReturnType, v));
         }
 
         return try output.toOwnedSlice();
@@ -57,7 +59,7 @@ const LineReader = struct {
 
     /// Reads N elements on a line, splits them by `delimiter` and parses them
     /// Asserts there is atlease 1 element
-    fn readNElements(self: Self, comptime ReturnType: type, delimiter: u8, amount: u32) ![]ReturnType {
+    fn readNElements(self: Self, comptime ReturnType: type, delimiter: u8, amount: usize) ![]ReturnType {
         const line = try self.read();
         defer self.allocator.free(line);
         var values = std.mem.splitScalar(u8, line, delimiter);
@@ -65,40 +67,31 @@ const LineReader = struct {
 
         for (0..amount) |_| {
             const v = values.next() orelse unreachable;
-            output.appendAssumeCapacity(switch (@typeInfo(ReturnType)) {
-                .Int => try std.fmt.parseInt(ReturnType, v, 10),
-                .Float => try std.fmt.parseFloat(ReturnType, v),
-                // Asserts the type is []u8
-                .Pointer => blk: {
-                    if (ReturnType != []const u8) return error.UnsupportedType;
-                    break :blk try self.allocator.dupe(u8, v);
-                },
-                else => error.UnsupportedType,
-            });
+            output.appendAssumeCapacity(try self.parseType(ReturnType, v));
         }
 
         return try output.toOwnedSlice();
     }
 
     /// Reads a complex type
-    /// The shape needs to contain atleast n - 1 shapes
+    /// The shape needs to contain atleast n - 1 shapes, and the shapes of inside structs should be flattened
     /// The caller is responsible for freeing all the memory
-    fn readType(self: Self, comptime ReturnType: type, shape: []const u32, delimiter: u8) !ReturnType {
+    fn readType(self: Self, comptime ReturnType: type, shape: []const usize, delimiter: u8) !ReturnType {
         const typeInfo = @typeInfo(ReturnType);
         switch (typeInfo) {
             .Int, .Float => {
-                return self.readValue(ReturnType, delimiter);
+                return self.readValue(ReturnType);
             },
             .Pointer => {
                 const childType = typeInfo.Pointer.child;
                 if (ReturnType == []const u8) {
-                    return try self.read();
+                    return self.read();
                 }
                 switch (@typeInfo(childType)) {
                     .Int, .Float => {
                         if (shape.len == 0) {
-                            return try self.readList(childType, delimiter);
-                        } else return try self.readNElements(childType, delimiter, shape[0]);
+                            return self.readList(childType, delimiter);
+                        } else return self.readNElements(childType, delimiter, shape[0]);
                     },
                     .Pointer, .Struct => {
                         if (childType == []const u8) {
@@ -115,9 +108,39 @@ const LineReader = struct {
             },
             .Struct => {
                 const s = try self.allocator.create(ReturnType);
+                var line: []const u8 = "";
+                var currentIndex: usize = 0;
+                var subShape = shape;
                 inline for (typeInfo.Struct.fields) |field| {
-                    @field(s, field.name) = try self.readType(field.type, shape, delimiter);
+                    const fieldInfo = @typeInfo(field.type);
+                    switch (fieldInfo) {
+                        .Int, .Float, .Pointer, .Struct => {
+                            if (fieldInfo == .Int or fieldInfo == .Float or field.type == []const u8) {
+                                if (line.len == currentIndex) {
+                                    line = try self.read();
+                                }
+                                const index = std.mem.indexOfScalarPos(u8, line, currentIndex, delimiter);
+                                if (index == null) {
+                                    @field(s, field.name) = try self.parseType(field.type, line[currentIndex..]);
+                                    self.allocator.free(line);
+                                    currentIndex = 0;
+                                    line = "";
+                                } else {
+                                    @field(s, field.name) = try self.parseType(field.type, line[currentIndex..index.?]);
+                                    currentIndex = index.? + 1;
+                                }
+                            } else {
+                                self.allocator.free(line);
+                                line = "";
+                                currentIndex = 0;
+                                @field(s, field.name) = try self.readType(field.type, shape, delimiter);
+                                subShape = subShape[1..];
+                            }
+                        },
+                        else => return error.UnsupportedType,
+                    }
                 }
+                self.allocator.free(line);
                 defer self.allocator.destroy(s);
                 return s.*;
             },
@@ -138,7 +161,7 @@ pub fn main() !void {
         fun: []const u8,
     };
 
-    const matrix = try lineReader.readType([]Matrix, &[_]u32{ 2, 5, 5 }, ' ');
+    const matrix = try lineReader.readType([]Matrix, &[_]usize{ 2, 5, 5 }, ' ');
 
     std.debug.print("Matrix: {any}", .{matrix});
 }
@@ -150,7 +173,7 @@ test "LineReader" {
     const input = try std.fs.cwd().openFile("tests/LineReader.input", .{});
 
     var lineReader = LineReader.init(allocator, input.reader());
-    const line = try lineReader.read();
+    const line = try lineReader.readType([]const u8, &[_]usize{}, ' ');
     defer allocator.free(line);
     const numbers = try lineReader.readNElements(i32, ' ', 3);
     defer allocator.free(numbers);
@@ -177,19 +200,33 @@ test "LineReader" {
         fun: []const u8,
     };
 
-    const matrix = try lineReader.readType([]Matrix, &[_]u32{ 2, 5, 5 }, ' ');
+    const matrix = try lineReader.readType([]Matrix, &[_]usize{ 2, 5, 5 }, ' ');
     defer {
         for (matrix) |structs| {
+            std.debug.print("Matrix content: {any}\n", .{structs.content});
             for (structs.content) |row| {
                 allocator.free(row);
             }
+            std.debug.print("Matrix fun: {s}\n", .{structs.fun});
             allocator.free(structs.content);
             allocator.free(structs.fun);
         }
         allocator.free(matrix);
     }
 
-    std.debug.print("Matrix: {any}", .{matrix});
+    const SuperValue = struct { n: i32, s: i32, a: []const u8, b: []const u8 };
+    const values = try lineReader.readType([]SuperValue, &[_]usize{3}, ' ');
+    defer {
+        for (values) |superValue| {
+            std.debug.print("SuperValue.a: {s}\n", .{superValue.a});
+            std.debug.print("SuperValue.b: {s}\n", .{superValue.b});
+            std.debug.print("SuperValue.n: {d}\n", .{superValue.n});
+            std.debug.print("SuperValue.s: {d}\n", .{superValue.s});
+            allocator.free(superValue.a);
+            allocator.free(superValue.b);
+        }
+        allocator.free(values);
+    }
 
     try expect(std.mem.eql(u8, line, "Hello world"));
     try expect(std.mem.eql(i32, numbers, &[_]i32{ 123, 456, 789 }));

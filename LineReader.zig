@@ -94,7 +94,7 @@ const LineReader = struct {
                         } else return self.readNElements(childType, delimiter, shape[0]);
                     },
                     .Pointer, .Struct => {
-                        if (childType == []const u8) {
+                        if (ReturnType == []const u8) {
                             return try self.read();
                         }
                         var values = try std.ArrayList(childType).initCapacity(self.allocator, shape[0]);
@@ -134,7 +134,8 @@ const LineReader = struct {
                                 line = "";
                                 currentIndex = 0;
                                 @field(s, field.name) = try self.readType(field.type, shape, delimiter);
-                                subShape = subShape[1..];
+                                if (subShape.len > 0)
+                                    subShape = subShape[1..];
                             }
                         },
                         else => return error.UnsupportedType,

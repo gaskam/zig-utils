@@ -115,7 +115,8 @@ const LineReader = struct {
                     const fieldInfo = @typeInfo(field.type);
                     switch (fieldInfo) {
                         .Int, .Float, .Pointer, .Struct => {
-                            if (fieldInfo == .Int or fieldInfo == .Float or field.type == []const u8) {
+                            if (fieldInfo == .Int or fieldInfo == .Float or (field.type == []const u8 and subShape.len > 0 and subShape[0] == 1)) {
+                                if (field.type == []const u8 and subShape[0] == 1) subShape = subShape[1..];
                                 if (line.len == currentIndex) {
                                     line = try self.read();
                                 }

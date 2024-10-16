@@ -99,7 +99,7 @@ const LineReader = struct {
                         }
                         var values = try std.ArrayList(childType).initCapacity(self.allocator, shape[0]);
                         for (shape[0]) |_| {
-                            values.appendAssumeCapacity(try self.readType(childType, subShape[1..], delimiter));
+                            values.appendAssumeCapacity(try self.readType(childType, shape[1..], delimiter));
                         }
                         return values.toOwnedSlice();
                     },
@@ -133,7 +133,7 @@ const LineReader = struct {
                                 self.allocator.free(line);
                                 line = "";
                                 currentIndex = 0;
-                                @field(s, field.name) = try self.readType(field.type, shape, delimiter);
+                                @field(s, field.name) = try self.readType(field.type, subShape, delimiter);
                                 if (subShape.len > 0)
                                     subShape = subShape[1..];
                             }

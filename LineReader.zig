@@ -73,6 +73,45 @@ const LineReader = struct {
         return try output.toOwnedSlice();
     }
 
+    /// Returns the amount of lens needed for shape inside of a type
+    inline fn readDepth(self: Self, comptime ReturnType: type) !comptime_int {
+        const typeInfo = @typeInfo(ReturnType);
+        return switch (typeInfo) {
+            .Int, .Float => 0,
+            .Pointer => blk: {
+                const childType = typeInfo.Pointer.child;
+                if (ReturnType == []const u8) {
+                    break :blk 0;
+                }
+                switch (@typeInfo(childType)) {
+                    .Int, .Float => break :blk 0,
+                    .Pointer, .Struct => {
+                        if (ReturnType == []const u8) {
+                            break :blk 0;
+                        }
+                        break :blk 1 + try self.readDepth(childType);
+                    },
+                    else => return error.UnsupportedType,
+                }
+            },
+            .Struct => {
+                var depth: usize = 0;
+                inline for (typeInfo.Struct.fields) |field| {
+                    const fieldInfo = @typeInfo(field.type);
+                    switch (fieldInfo) {
+                        .Int, .Float => {},
+                        .Pointer, .Struct => {
+                            depth += try self.readDepth(field.type);
+                        },
+                        else => return error.UnsupportedType,
+                    }
+                }
+                @as(comptime_int, depth);
+            },
+            else => error.UnsupportedType,
+        };
+    }
+
     /// Reads a complex type
     /// The shape needs to contain atleast n - 1 shapes, and the shapes of inside structs should be flattened
     /// The caller is responsible for freeing all the memory
@@ -114,29 +153,28 @@ const LineReader = struct {
                 inline for (typeInfo.Struct.fields) |field| {
                     const fieldInfo = @typeInfo(field.type);
                     switch (fieldInfo) {
-                        .Int, .Float, .Pointer, .Struct => {
-                            if (fieldInfo == .Int or fieldInfo == .Float or field.type == []const u8) {
-                                if (line.len == currentIndex) {
-                                    line = try self.read();
-                                }
-                                const index = std.mem.indexOfScalarPos(u8, line, currentIndex, delimiter);
-                                if (index == null) {
-                                    @field(s, field.name) = try self.parseType(field.type, line[currentIndex..]);
-                                    self.allocator.free(line);
-                                    currentIndex = 0;
-                                    line = "";
-                                } else {
-                                    @field(s, field.name) = try self.parseType(field.type, line[currentIndex..index.?]);
-                                    currentIndex = index.? + 1;
-                                }
-                            } else {
-                                self.allocator.free(line);
-                                line = "";
-                                currentIndex = 0;
-                                @field(s, field.name) = try self.readType(field.type, subShape, delimiter);
-                                if (subShape.len > 0)
-                                    subShape = subShape[1..];
+                        .Int, .Float => {
+                            if (line.len == currentIndex) {
+                                line = try self.read();
                             }
+                            const index = std.mem.indexOfScalarPos(u8, line, currentIndex, delimiter);
+                            if (index == null) {
+                                @field(s, field.name) = try self.parseType(field.type, line[currentIndex..]);
+                                self.allocator.free(line);
+                                currentIndex = 0;
+                                line = "";
+                            } else {
+                                @field(s, field.name) = try self.parseType(field.type, line[currentIndex..index.?]);
+                                currentIndex = index.? + 1;
+                            }
+                        },
+                        .Pointer, .Struct => {
+                            self.allocator.free(line);
+                            line = "";
+                            currentIndex = 0;
+                            @field(s, field.name) = try self.readType(field.type, subShape, delimiter);
+                            if (subShape.len > 0)
+                                subShape = subShape[1..];
                         },
                         else => return error.UnsupportedType,
                     }
@@ -162,7 +200,8 @@ pub fn main() !void {
         fun: []const u8,
     };
 
-    const matrix = try lineReader.readType([]Matrix, &[_]usize{ 2, 5, 5 }, ' ');
+    @compileLog(lineReader.readDepth([][][]Matrix));
+    const matrix = try lineReader.readType([]Matrix, &[_]usize{ 2, 3, 3 }, ' ');
 
     std.debug.print("Matrix: {any}", .{matrix});
 }

@@ -14,7 +14,9 @@ const LineReader = struct {
     fn read(self: Self) ![]const u8 {
         var buffer = std.ArrayList(u8).init(self.allocator);
         errdefer buffer.deinit();
-        try self.reader.streamUntilDelimiter(buffer.writer(), '\n', null);
+        self.reader.streamUntilDelimiter(buffer.writer(), '\n', null) catch |err| {
+            if (err != error.EndOfStream) return err;
+        };
         if (builtin.target.os.tag == .windows and buffer.getLastOrNull() == '\r') _ = buffer.pop();
         return buffer.toOwnedSlice();
     }
@@ -49,11 +51,11 @@ const LineReader = struct {
         defer self.allocator.free(line);
         var values = std.mem.splitScalar(u8, line, delimiter);
         var output = std.ArrayList(ReturnType).init(self.allocator);
+        errdefer output.deinit();
 
         while (values.next()) |v| {
             try output.append(try self.parseType(ReturnType, v));
         }
-
         return try output.toOwnedSlice();
     }
 
@@ -64,6 +66,7 @@ const LineReader = struct {
         defer self.allocator.free(line);
         var values = std.mem.splitScalar(u8, line, delimiter);
         var output = try std.ArrayList(ReturnType).initCapacity(self.allocator, amount);
+        errdefer output.deinit();
 
         for (0..amount) |_| {
             const v = values.next() orelse unreachable;
@@ -84,10 +87,10 @@ const LineReader = struct {
                     break :blk 0;
                 }
                 switch (@typeInfo(childType)) {
-                    .Int, .Float => break :blk 0,
+                    .Int, .Float => break :blk 1,
                     .Pointer, .Struct => {
                         if (ReturnType == []const u8) {
-                            break :blk 0;
+                            break :blk 1;
                         }
                         break :blk 1 + try self.readDepth(childType);
                     },
@@ -95,7 +98,7 @@ const LineReader = struct {
                 }
             },
             .Struct => {
-                var depth: usize = 0;
+                comptime var depth: usize = 0;
                 inline for (typeInfo.Struct.fields) |field| {
                     const fieldInfo = @typeInfo(field.type);
                     switch (fieldInfo) {
@@ -106,7 +109,7 @@ const LineReader = struct {
                         else => return error.UnsupportedType,
                     }
                 }
-                @as(comptime_int, depth);
+                return depth;
             },
             else => error.UnsupportedType,
         };
@@ -128,15 +131,14 @@ const LineReader = struct {
                 }
                 switch (@typeInfo(childType)) {
                     .Int, .Float => {
-                        if (shape.len == 0) {
-                            return self.readList(childType, delimiter);
-                        } else return self.readNElements(childType, delimiter, shape[0]);
+                        return self.readNElements(childType, delimiter, shape[0]);
                     },
                     .Pointer, .Struct => {
                         if (ReturnType == []const u8) {
                             return try self.read();
                         }
                         var values = try std.ArrayList(childType).initCapacity(self.allocator, shape[0]);
+                        errdefer values.deinit();
                         for (shape[0]) |_| {
                             values.appendAssumeCapacity(try self.readType(childType, shape[1..], delimiter));
                         }
@@ -147,6 +149,7 @@ const LineReader = struct {
             },
             .Struct => {
                 const s = try self.allocator.create(ReturnType);
+                defer self.allocator.destroy(s);
                 var line: []const u8 = "";
                 var currentIndex: usize = 0;
                 var subShape = shape;
@@ -174,13 +177,12 @@ const LineReader = struct {
                             currentIndex = 0;
                             @field(s, field.name) = try self.readType(field.type, subShape, delimiter);
                             if (subShape.len > 0)
-                                subShape = subShape[1..];
+                                subShape = subShape[try self.readDepth(field.type)..];
                         },
                         else => return error.UnsupportedType,
                     }
                 }
                 self.allocator.free(line);
-                defer self.allocator.destroy(s);
                 return s.*;
             },
             else => return error.UnsupportedType,
@@ -197,18 +199,15 @@ pub fn main() !void {
 
     const Matrix = struct {
         content: [][]i32,
-        fun: []const u8,
+        text: []const u8,
     };
 
-    @compileLog(lineReader.readDepth([][][]Matrix));
     const matrix = try lineReader.readType([]Matrix, &[_]usize{ 2, 3, 3 }, ' ');
 
     std.debug.print("Matrix: {any}", .{matrix});
 }
 
 test "LineReader" {
-    const expect = std.testing.expect;
-
     const allocator = std.testing.allocator;
     const input = try std.fs.cwd().openFile("tests/LineReader.input", .{});
 
@@ -237,19 +236,17 @@ test "LineReader" {
 
     const Matrix = struct {
         content: [][]i32,
-        fun: []const u8,
+        text: []const u8,
     };
 
     const matrix = try lineReader.readType([]Matrix, &[_]usize{ 2, 5, 5 }, ' ');
     defer {
         for (matrix) |structs| {
-            std.debug.print("Matrix content: {any}\n", .{structs.content});
             for (structs.content) |row| {
                 allocator.free(row);
             }
-            std.debug.print("Matrix fun: {s}\n", .{structs.fun});
             allocator.free(structs.content);
-            allocator.free(structs.fun);
+            allocator.free(structs.text);
         }
         allocator.free(matrix);
     }
@@ -258,25 +255,93 @@ test "LineReader" {
     const values = try lineReader.readType([]SuperValue, &[_]usize{3}, ' ');
     defer {
         for (values) |superValue| {
-            std.debug.print("SuperValue.a: {s}\n", .{superValue.a});
-            std.debug.print("SuperValue.b: {s}\n", .{superValue.b});
-            std.debug.print("SuperValue.n: {d}\n", .{superValue.n});
-            std.debug.print("SuperValue.s: {d}\n", .{superValue.s});
             allocator.free(superValue.a);
             allocator.free(superValue.b);
         }
         allocator.free(values);
     }
 
-    try expect(std.mem.eql(u8, line, "Hello world"));
-    try expect(std.mem.eql(i32, numbers, &[_]i32{ 123, 456, 789 }));
-    try expect(std.mem.eql(f64, floats, &[_]f64{ -2.5, 2.8, 9.7, 3.14 }));
+    const ArrayStruct = struct {
+        a: []i32,
+        b: []i32
+    };
 
-    const expectedStrings = [_][]const u8{ "the", "new", "hello", "world" };
-    for (strings, expectedStrings) |output, expected| {
-        try expect(std.mem.eql(u8, output, expected));
+    const NestedStruct = struct {
+        struct1: ArrayStruct,
+        struct2: ArrayStruct,
+    };
+
+    const nestedStruct = try lineReader.readType([]NestedStruct, &[_]usize{2, 1, 2, 3, 4}, ' ');
+    defer {
+        for (nestedStruct) |nested| {
+            allocator.free(nested.struct1.a);
+            allocator.free(nested.struct1.b);
+            allocator.free(nested.struct2.a);
+            allocator.free(nested.struct2.b);
+        }
+        allocator.free(nestedStruct);
     }
 
-    try expect(emptyStrings.len == 1);
-    try expect(std.mem.eql(u8, emptyStrings[0], &[0]u8{}));
+    try std.testing.expectEqualStrings(line, "Hello world");
+    try std.testing.expectEqualDeep(numbers, &[_]i32{ 123, 456, 789 });
+    try std.testing.expectEqualDeep(floats, &[_]f64{ -2.5, 2.8, 9.7, 3.14 });
+    try std.testing.expectEqualDeep(strings, &[_][]const u8{ "the", "new", "hello", "world" });
+    try std.testing.expectEqualDeep(emptyStrings, &[_][]const u8{""});
+
+    const expectedMatrix = &[_]Matrix{
+        Matrix{
+            .content = @constCast(&[_][]i32 {
+                @constCast(&[_]i32{3, 4, 6, 8, 7}),
+                @constCast(&[_]i32{7, 8, 9, 5, 6}),
+                @constCast(&[_]i32{7, 8, 4, 2, 7}),
+                @constCast(&[_]i32{9, 7, 8, 6, 2}),
+                @constCast(&[_]i32{2, 5, 6, 8, 4}),
+            }),
+            .text = "hello world",
+        },
+        Matrix{
+            .content = @constCast(&[_][]i32 {
+                @constCast(&[_]i32{7, 8, 9, 6, 5}),
+                @constCast(&[_]i32{1, 0, 2, 3, 6}),
+                @constCast(&[_]i32{8, 9, 6, 3, 2}),
+                @constCast(&[_]i32{7, 8, 9, 6, 5}),
+                @constCast(&[_]i32{1, 2, 5, 4, 7}),
+            }),
+            .text = "see you later",
+        }
+    };
+    try std.testing.expectEqualDeep(matrix, expectedMatrix);
+
+    const expectedValues = &[_]SuperValue{
+        SuperValue{ .n = 2, .s = 6, .a = "mjalajdsfk", .b = "mladfsmljqslkf" },
+        SuperValue{ .n = 8, .s = 9, .a = "qsdfjqmlfp", .b = "poaljmdflk" },
+        SuperValue{ .n = 98645, .s = 8, .a = "apdlfkjqmd", .b = "mladjfqp" },
+    };
+    try std.testing.expectEqualDeep(values, expectedValues);
+
+    const expectedNestedStruct = &[_]NestedStruct{
+        NestedStruct{
+            .struct1 = ArrayStruct{ 
+                .a = @constCast(&[_]i32{1}), 
+                .b = @constCast(&[_]i32{1, 2}) 
+            },
+            .struct2 = ArrayStruct{ 
+                .a = @constCast(&[_]i32{1, 2, 3}), 
+                .b = @constCast(&[_]i32{1, 2, 3, 4}) 
+            },
+        },
+        NestedStruct{
+            .struct1 = ArrayStruct{ 
+                .a = @constCast(&[_]i32{9}), 
+                .b = @constCast(&[_]i32{9, 8}) 
+            },
+            .struct2 = ArrayStruct{ 
+                .a = @constCast(&[_]i32{9, 8, 7}), 
+                .b = @constCast(&[_]i32{9, 8, 7, 6})
+            },
+        },
+    };
+
+    try std.testing.expectEqualDeep(nestedStruct, expectedNestedStruct);
+
 }

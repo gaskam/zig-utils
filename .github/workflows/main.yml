@@ -16,5 +16,5 @@ jobs:
         uses: mlugg/setup-zig@v1
       - name: Run the tests
         run: |
-          zig build test --summary-all
+          zig build test --summary all
       - run: echo "🍏 Job done. Exited with status ${{ job.status }}."

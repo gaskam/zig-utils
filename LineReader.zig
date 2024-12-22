@@ -39,7 +39,7 @@ pub fn parseType(self: Self, comptime ReturnType: type, buf: []const u8) !Return
 /// Parses one line to a value(only supports int, float or bool types)
 /// Asserts there is a numeric value
 pub fn readValue(self: Self, comptime ReturnType: type) !ReturnType {
-    const value = try read(self);
+    const value = try self.read();
     defer self.allocator.free(value);
     return self.parseType(ReturnType, value);
 }
@@ -50,6 +50,7 @@ pub fn readList(self: Self, comptime ReturnType: type, delimiter: u8) ![]ReturnT
     const line = try self.read();
     defer self.allocator.free(line);
     var values = std.mem.splitScalar(u8, line, delimiter);
+
     var output = std.ArrayList(ReturnType).init(self.allocator);
     errdefer output.deinit();
 
@@ -58,7 +59,6 @@ pub fn readList(self: Self, comptime ReturnType: type, delimiter: u8) ![]ReturnT
     }
     return try output.toOwnedSlice();
 }
-
 
 pub fn readArray(self: Self, comptime ReturnType: type, delimiter: u8) !ReturnType {
     const typeInfo = @typeInfo(ReturnType);
@@ -77,17 +77,16 @@ pub fn readArray(self: Self, comptime ReturnType: type, delimiter: u8) !ReturnTy
 pub fn readNElements(self: Self, comptime ReturnType: type, delimiter: u8, amount: usize) ![]ReturnType {
     const line = try self.read();
     defer self.allocator.free(line);
-    
-    var values = std.mem.splitScalar(u8, line, delimiter);
-    var output = try std.ArrayList(ReturnType).initCapacity(self.allocator, amount);
-    errdefer output.deinit();
 
-    for (0..amount) |_| {
+    var values = std.mem.splitScalar(u8, line, delimiter);
+    var output = try self.allocator.alloc(ReturnType, amount);
+
+    for (0..amount) |i| {
         const v = values.next() orelse unreachable;
-        output.appendAssumeCapacity(try self.parseType(ReturnType, v));
+        output[i] = try self.parseType(ReturnType, v);
     }
 
-    return try output.toOwnedSlice();
+    return output;
 }
 
 /// Returns the amount of lens needed for shape inside of a type
@@ -101,27 +100,18 @@ inline fn readDepth(self: Self, comptime ReturnType: type) !comptime_int {
             if (ReturnType == []const u8) {
                 break :blk 0;
             }
-            switch (@typeInfo(childType)) {
-                .Int, .Float => break :blk 1,
-                .Pointer, .Struct => {
-                    if (ReturnType == []const u8) {
-                        break :blk 1;
-                    }
-                    break :blk 1 + try self.readDepth(childType);
-                },
-                else => return error.UnsupportedType,
-            }
+
+            break :blk 1 + try self.readDepth(childType);
         },
         .Struct => {
             comptime var depth: usize = 0;
             inline for (typeInfo.Struct.fields) |field| {
                 const fieldInfo = @typeInfo(field.type);
                 switch (fieldInfo) {
-                    .Int, .Float => {},
                     .Pointer, .Struct => {
                         depth += try self.readDepth(field.type);
                     },
-                    else => return error.UnsupportedType,
+                    else => {},
                 }
             }
             return depth;
@@ -158,13 +148,18 @@ pub fn readStruct(self: Self, comptime ReturnType: type, shape: ?[]const usize, 
                     currentIndex = index.? + 1;
                 }
             },
+            .Array => {
+                @field(s, field.name) = try self.readArray(field.type, delimiter);
+            },
             .Pointer, .Struct => {
                 self.allocator.free(line);
                 line = "";
                 currentIndex = 0;
-                @field(s, field.name) = try self.readType(field.type, subShape, delimiter);
+
+                const depth = try self.readDepth(field.type);
+                @field(s, field.name) = try self.readType(field.type, subShape[0..depth], delimiter);
                 if (subShape.len > 0)
-                    subShape = subShape[try self.readDepth(field.type)..];
+                    subShape = subShape[depth..];
             },
             else => return error.UnsupportedType,
         }
@@ -178,6 +173,8 @@ pub fn readStruct(self: Self, comptime ReturnType: type, shape: ?[]const usize, 
 /// The caller is responsible for freeing all the memory
 pub fn readType(self: Self, comptime ReturnType: type, shape: ?[]const usize, delimiter: u8) !ReturnType {
     const typeInfo = @typeInfo(ReturnType);
+    std.debug.assert(try self.readDepth(ReturnType) == (shape orelse &[_]usize{}).len);
+
     switch (typeInfo) {
         .Int, .Float, .Bool => {
             return self.readValue(ReturnType);
